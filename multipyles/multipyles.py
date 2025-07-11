@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 
 from . import helper
-from .multipole_eqs import orbital_part, spin_part, coupling_part, exchange_k, hartree_k, SIGMA, PAULI_MATRICES
+from . import multipole_eqs as eq
 
 _IO_ENTRIES = ['species', 'atom', 'nu', 'l1', 'l2', 'k', 'p', 'r', 't', 'value']
 
@@ -71,7 +71,7 @@ def calculate(density_matrix, cubic=True, verbose=False):
 
     # Transforms density matrix from cubic to spherical harmonics
     if cubic:
-        print('Transforming from cubic to spherical harmonics')
+        # print('Transforming from cubic to spherical harmonics')
         trafo_matrix = helper.spherical_to_cubic(l)
         density_matrix = np.einsum('al,iabrs,bk->ilkrs', trafo_matrix, density_matrix,
                                     trafo_matrix.conj())
@@ -93,7 +93,7 @@ def calculate(density_matrix, cubic=True, verbose=False):
             print(density_matrix[:, :, :, 1, 1])
 
     # Decomposes density matrix into Pauli matrices
-    density_matrix_pauli = np.einsum('imnrs,psr->imnp', density_matrix, PAULI_MATRICES)/2
+    density_matrix_pauli = np.einsum('imnrs,psr->imnp', density_matrix, eq.PAULI_MATRICES)/2
     if verbose:
         print('-'*40)
         print('Density matrix in Pauli matrices')
@@ -114,7 +114,7 @@ def calculate(density_matrix, cubic=True, verbose=False):
                                                          (-1, -1, -1, 1),
                                                          density_matrix_pauli[:, ::-1, ::-1]) * tr
                                              for tr in (1, -1)])
-    density_matrix_tr = np.einsum('uimnp,prs->uimnrs', density_matrix_pauli_tr, PAULI_MATRICES)
+    density_matrix_tr = np.einsum('uimnp,prs->uimnrs', density_matrix_pauli_tr, eq.PAULI_MATRICES)
 
     if verbose:
         print('-'*40)
@@ -134,21 +134,21 @@ def calculate(density_matrix, cubic=True, verbose=False):
     # Calculates multipole moments
     results = []
 
-    s_range = (+SIGMA, -SIGMA)
+    s_range = (+eq.SIGMA, -eq.SIGMA)
     m_range = range(-l, l+1)
     for k in range(2*l+1): # orbital dof
         x_range = range(-k, k+1)
-        orbital_matrix = np.array([[[orbital_part(l, k, x, m, mp) for mp in m_range]
+        orbital_matrix = np.array([[[eq.orbital_part(l, k, x, m, mp) for mp in m_range]
                                     for m in m_range] for x in x_range])
 
         for p in (0, 1): # spin dof
             y_range = range(-p, p+1)
-            spin_matrix = np.array([[[spin_part(p, y, s, sp) for sp in s_range]
+            spin_matrix = np.array([[[eq.spin_part(p, y, s, sp) for sp in s_range]
                                      for s in s_range] for y in y_range])
 
             for r in range(abs(k-p), k+p+1): # tensor rank
                 t_range = range(-r, r+1)
-                coupling_matrix = np.array([[[coupling_part(k, p, r, x, y, t) for t in t_range]
+                coupling_matrix = np.array([[[eq.coupling_part(k, p, r, x, y, t) for t in t_range]
                                              for y in y_range] for x in x_range])
 
                 if verbose:
@@ -161,7 +161,6 @@ def calculate(density_matrix, cubic=True, verbose=False):
                     print('spin_part(p, y, s, sp)')
                     print(spin_matrix)
 
-                # u=nu, m/n=m/m', r/s=s,s'
                 multipole_matrix_sph = np.einsum('xyt,xmn,yrs,uinmsr->uit', coupling_matrix,
                                                  orbital_matrix, spin_matrix, density_matrix_tr)
 
@@ -173,7 +172,7 @@ def calculate(density_matrix, cubic=True, verbose=False):
 
     return pd.DataFrame(results), l
 
-def write_shift_matrix_for_vasp(l, k, t, filename='shift.txt'):
+def write_shift_matrix_for_vasp(l, s, k, p, r, t, filename='shift.txt'):
     """
     Generates shift that triggers the multipole moment w^k0k_t with
     the correct normalization. The index t labels the cubic multipole and
@@ -189,48 +188,64 @@ def write_shift_matrix_for_vasp(l, k, t, filename='shift.txt'):
     ----------
     l : int
         The angular momentum l of the density matrix.
+    s : float
+        The spin momentum s of the density matrix.
     k : int
-        The rank/order of the charge multipole.
+        The rank/order of the spherical tensors spanning the orbital space.
+    p : int
+        The rank/order of the spherical tensors spanning the spin space.
+    r : int
+        The rank/order of the tensor multipole.
     t : int
-        The concrete charge multipole to be written to file,
-        t in {-k, -k+1, ..., +k}. Unused if filename is None.
+        The concrete multipole to be written to file,
+        t in {-r, -r+1, ..., +r}. Unused if filename is None.
     filename : string, optional
         The name of the file to write the shift matrix to. The default is 'shift.txt'.
 
     Returns
     -------
     shifts : numpy.array
-        The shift matrices for the parameters l, k but for all possible t.
-        The shape is (2k+1) x (2l+1) x (2l+1).
+        The shift matrices for the parameters l, s.
+        The shape is (2l+1) x (2l+1) x (2s+1) x (2s+1).
     """
 
     if k % 2 == 1:
         print('WARNING: For odd k, the shift matrices are imaginary and therefore'
              + ' not symmetrical. Please check carefully that there is no transpose'
              + ' missing when using the shift matrix in DFT.')
-    shifts = np.array([[[orbital_part(l, k, t_sph, m, mp) * helper.minus_one_to_the(k)
-                         for mp in range(-l, l+1)]
-                        for m in range(-l, l+1)]
-                       for t_sph in range(-k, k+1)])
+    
+    s_range = (+eq.SIGMA, -eq.SIGMA)
+    m_range = range(-l, l+1)
 
-    # first transform to cubic multipoles
-    trafo_matrix = helper.spherical_to_cubic(k)
-    shifts = np.einsum('ij,jmn', trafo_matrix, shifts)
-
-    # then transform matrix into cubic basis
+    x_range = range(-k, k+1)
+    orbital_matrix = np.array([[[eq.orbital_part(l, k, x, m, mp) for mp in m_range]
+                                    for m in m_range] for x in x_range])
     trafo_matrix = helper.spherical_to_cubic(l)
-    shifts = np.einsum('al,ilk,bk->iab', trafo_matrix.conj(), shifts, trafo_matrix)
+    orbital_matrix = np.einsum('am,xmn,bn->xab', trafo_matrix.conj(), orbital_matrix, trafo_matrix)
 
-    # Writes shift matrix for w^k0k_t to file
+    y_range = range(-p, p+1)
+    spin_matrix = np.array([[[eq.spin_part(p, y, s, sp) for sp in s_range]
+                                     for s in s_range] for y in y_range])
+
+    coupling_matrix = np.array([[[eq.coupling_part(k, p, r, x, y, t)
+                                             for y in y_range] for x in x_range] for t in range(-r, r+1)])
+    
+    shifts = np.einsum('tij,imn,jsz->tmnsz', coupling_matrix, orbital_matrix, spin_matrix)
+    trafo_matrix = helper.spherical_to_cubic(r)
+    shifts = np.einsum('ut,tmnsz->umnsz', trafo_matrix, shifts)
+    shifts = shifts[t+r]
+    
     if filename is not None:
-        if not (-k <= t <= k):
-            raise ValueError('t has to be in {-k, -k+1, ..., +k}')
+        if not (-r <= t <= r):
+            raise ValueError('t has to be in {-r, -r+1, ..., +r}')
+        if not (abs(k-p) <= r <= k+p):
+            raise ValueError('r has to be in {abs(k-p), ..., k+p}')
 
-        output = [f'{matrix.real:.18f} {matrix.imag:.18f}' for matrix in shifts[t+k].flatten()]
+        output = [f'{m.real:.18f} {m.imag:.18f}' for m in shifts.flatten()]
         with open(filename, 'w') as file:
             file.write('\n'.join(output))
 
-    return shifts
+    return shifts    
 
 def filter_results(df, cond):
     """ Filters dataframe df with condition from dictionary cond. """
@@ -286,8 +301,8 @@ def calculate_hartree_and_exchange_energies(l, results, uj=None, slater_ints=Non
         assert np.all(grouped_df['t'] == np.arange(-r, r+1)), 'Input dataframe is incomplete'
 
         val_squared = (grouped_df['value'].abs()**2).sum()
-        exchange_terms = val_squared * exchange_k(l, *label[5:])
-        hartree_terms = val_squared * hartree_k(l, label[5], label[6])
+        exchange_terms = val_squared * eq.exchange_k(l, *label[5:])
+        hartree_terms = val_squared * eq.hartree_k(l, label[5], label[6])
         new_data.append(label + (val_squared, ) + tuple(exchange_terms) + tuple(hartree_terms))
 
     new_tags = tags + ['w.w'] + [f'{name} F{2*i}' for name in ('exchange', 'hartree')
@@ -299,3 +314,135 @@ def calculate_hartree_and_exchange_energies(l, results, uj=None, slater_ints=Non
     energy_df['hartree total'] = sum([slater_ints[i] * energy_df[f'hartree F{2*i}']
                                       for i in range(l+1)])
     return energy_df
+
+def generate_mop(l, s, k, p, r, t):
+    """
+    Generates shift that triggers the multipole moment w^k0k_t with
+    the correct normalization. The index t labels the cubic multipole and
+    the matrix in orbital space is also in the cubic basis.
+
+    This shift matrix is then written to a file as a flatten matrix, where
+    every row of the file contains the real and imaginary part of that matrix.
+    This file is readable by the patched Vasp from this repository.
+
+    Warning: not tested for odd k. The implementation might be incorrect by a sign.
+
+    Parameters
+    ----------
+    l : int
+        The angular momentum l of the density matrix.
+    s : float
+        The spin momentum s of the density matrix.
+    k : int
+        The rank/order of the spherical tensors spanning the orbital space.
+    p : int
+        The rank/order of the spherical tensors spanning the spin space.
+    r : int
+        The rank/order of the tensor multipole.
+    t : int
+        The concrete multipole to be written to file,
+        t in {-r, -r+1, ..., +r}. Unused if filename is None.
+    filename : string, optional
+        The name of the file to write the shift matrix to. The default is 'shift.txt'.
+
+    Returns
+    -------
+    shifts : numpy.array
+        The shift matrices for the parameters l, s.
+        The shape is (2l+1) x (2l+1) x (2s+1) x (2s+1).
+    """
+
+    if k % 2 == 1:
+        print('WARNING: For odd k, the shift matrices are imaginary and therefore'
+             + ' not symmetrical. Please check carefully that there is no transpose'
+             + ' missing when using the shift matrix in DFT.')
+    
+    s_range = (+eq.SIGMA, -eq.SIGMA)
+    m_range = range(-l, l+1)
+
+    x_range = range(-k, k+1)
+    orbital_matrix = np.array([[[eq.orbital_part(l, k, x, m, mp) for mp in m_range]
+                                    for m in m_range] for x in x_range])
+    trafo_matrix = helper.spherical_to_cubic(l)
+    orbital_matrix = np.einsum('am,xmn,bn->xab', trafo_matrix.conj(), orbital_matrix, trafo_matrix)
+
+    y_range = range(-p, p+1)
+    spin_matrix = np.array([[[eq.spin_part(p, y, s, sp) for sp in s_range]
+                                     for s in s_range] for y in y_range])
+
+    coupling_matrix = np.array([[[eq.coupling_part(k, p, r, x, y, t)
+                                             for y in y_range] for x in x_range] for t in range(-r, r+1)])
+    
+    shifts = np.einsum('tij,imn,jsz->tmnsz', coupling_matrix, orbital_matrix, spin_matrix)
+    trafo_matrix = helper.spherical_to_cubic(r)
+    shifts = np.einsum('ut,tmnsz->umnsz', trafo_matrix, shifts)
+    shifts = shifts[t+r]
+
+    if not (-r <= t <= r):
+        raise ValueError('t has to be in {-r, -r+1, ..., +r}')
+    if not (abs(k-p) <= r <= k+p):
+        raise ValueError('r has to be in {abs(k-p), ..., k+p}')
+
+    return shifts
+
+def generate_matrix(l, s, mdic_at, mdic_at_nu=False):
+
+    matrices = []
+
+    for at in range(len(mdic_at.keys())):
+        mdic = mdic_at[at]
+        if (0,0,0,0) not in mdic.keys():
+            raise KeyError('Define matrix trace')
+        else:
+            mat = np.zeros(((2*l+1)*int(2*s+1), (2*l+1)*int(2*s+1)), dtype=complex)
+            
+        for key, value in mdic.items():
+            if not np.allclose(value, 0):
+                k, p, r, t = key
+                shift_matrix = generate_mop(l, s, k, p, r, t).transpose((0, 2, 1, 3)).reshape((2*l+1)*int(2*s+1),(2*l+1)*int(2*s+1)) 
+                norm = np.einsum('nm,nm',shift_matrix.conj(),shift_matrix)
+                mat += value*shift_matrix/norm
+        if mdic_at_nu:
+            mdic_nu = mdic_at_nu[at]
+            for key, value in mdic_nu.items():
+                if not np.allclose(value, 0):
+                    k, p, r, t = key
+                    shift_matrix = generate_mop(l, s, k, p, r, t).transpose((0, 2, 1, 3)).reshape((2*l+1)*int(2*s+1),(2*l+1)*int(2*s+1)) 
+                    norm = np.einsum('nm,nm',shift_matrix.conj(),shift_matrix)
+                    mat += value*shift_matrix/norm
+
+        if not np.allclose(mat, mat.T.conj()):
+            print("WARNING! Density matrix is not Hermitian.")
+        if not np.all(np.linalg.eigvals(mat) > 0):
+            print("WARNING! Density matrix is not positive definite.")
+
+        matrices.append(mat)
+    return matrices
+
+def generate_random_dic(natom, l, s, nel, symmetric_atoms=False, collinear=False):
+
+    mdic_at, mdic_at_nu = {}, {}
+
+    for at in range(natom): 
+        mdic_at[at], mdic_at_nu[at] = {}, {}
+        if symmetric_atoms and at > 0:
+            mdic_at[at], mdic_at_nu[at] = mdic_at[0], mdic_at_nu[0]
+        else:
+            for k in range(0,2*l+1):
+                for p in range(0,int(2*s+1)):
+                    for r in range(abs(k-p),k+p+1):
+                        for t in range(-r,r+1): 
+                            if (k,p,r,t) == (0,0,0,0):
+                                mval = nel
+                                mval_nu = 0
+                            else:
+                                if collinear and (t == -r or t == r):
+                                    mval, mval_nu = 0, 0
+                                else:
+                                    mval = np.random.rand()
+                                    mval_nu = np.random.rand()
+                            mdic_at[at][(k,p,r,t)] = mval
+                            mdic_at_nu[at][(k,p,r,t)] = mval_nu
+
+
+    return mdic_at, mdic_at_nu

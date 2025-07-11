@@ -20,7 +20,7 @@ def check_density_matrix_and_get_angular_momentum(density_matrix):
         raise ValueError('Spin dimensions different from 2')
 
     l = dim // 2
-    print(f'Angular momentum of density matrix is l = {l}')
+    # print(f'Angular momentum of density matrix is l = {l}')
 
     # Checks if matrix is Hermitian
     if not np.allclose(density_matrix.conj(),
@@ -71,3 +71,29 @@ def uj_to_slater_integrals(l, u, j):
     else:
         raise NotImplementedError('Conversion from U and J to Slater integrals '
                                   + 'only implemented for l=1 and l=2.')
+
+import numpy as np
+
+def time_reversal_op(l, nu):
+    """
+    Compute the transformation matrix T that maps density_matrix to density_matrix_pauli_tr.
+    """
+
+    PAULI_MATRICES = np.array([[[0, 1], [1, 0]], [[0, -1j], [1j, 0]],
+                           [[1, 0], [0, -1]], [[1, 0], [0, 1]]]) # x, y, z, 0
+    
+    id = np.eye(10).reshape((5,5,2,2))
+    
+    id_pauli = np.einsum('mnrs,psr->mnp', id, PAULI_MATRICES)/2
+    alternating_minus = 1-2*(np.arange(-l, l+1) % 2)
+    op_pauli = .5 * id_pauli + np.einsum('m,n,p,mnp->nmp', alternating_minus,alternating_minus,
+                                                                    (-1, -1, -1, 1),id_pauli[:, ::-1, ::-1]) * nu
+    op = np.einsum('mnp,prs->mnrs', op_pauli, PAULI_MATRICES)
+    return op
+
+def qe_to_vasp(mat):
+    l = mat.shape[1]
+    if l == 5:
+        order0 = [3, 2, 0, 1, 4]    
+        newmat = mat[np.ix_(range(mat.shape[0]),order0, order0, range(2), range(2))]
+    return newmat

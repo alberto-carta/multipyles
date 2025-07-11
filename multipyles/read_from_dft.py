@@ -6,6 +6,7 @@ as well as multipoles computed in VASP and Elk.
 import warnings
 import numpy as np
 import pandas as pd
+from . import helper
 
 _IO_ENTRIES = ['species', 'atom', 'nu', 'l1', 'l2', 'k', 'p', 'r', 't', 'value']
 
@@ -81,7 +82,6 @@ def read_multipoles_from_vasp(source):
 
     return pd.DataFrame(results)
 
-
 def read_densmat_from_vasp(source, select_atoms=None):
     """
     Reads the VASP OUTCAR for the density matrix of the last step from the
@@ -152,9 +152,17 @@ def read_densmat_from_vasp(source, select_atoms=None):
         data = data.reshape(data.shape[0], 2, 2, dim, dim)
     # Collinear calculations are zero in spin-off-diagonal entries
     elif nspins == 2:
-        reshaped_data = np.zeros((data.shape[0], 2, 2, dim, dim), dtype=float)
-        reshaped_data[:, [0, 1], [0, 1]] = data.reshape(data.shape[0], nspins, dim, dim)
-        data = reshaped_data
+        if dim % 2 == 0:
+            dim //= 2
+            data = data[:, :, :dim] + 1j * data[:, :, dim:]
+            data = data.reshape(data.shape[0], 2, dim, dim)
+            reshaped_data = np.zeros((data.shape[0], 2, 2, dim, dim), dtype=complex)
+            reshaped_data[:, [0, 1], [0, 1]] = data
+            data = reshaped_data
+        else:
+            reshaped_data = np.zeros((data.shape[0], 2, 2, dim, dim), dtype=float)
+            reshaped_data[:, [0, 1], [0, 1]] = data.reshape(data.shape[0], nspins, dim, dim)
+            data = reshaped_data
 
     # Transposes only orbital degrees of freedom:
     # Vasp indexes spins in "C order": uu, ud, du, dd
@@ -165,6 +173,74 @@ def read_densmat_from_vasp(source, select_atoms=None):
     # - F order of orbitals: cf. relativistic.F in VASP source code
     return data.transpose((0, 4, 3, 1, 2))
 
+def read_densmat_from_qe(source, select_atoms=None):
+    lines = source.readlines()
+
+
+    for ln, line in enumerate(reversed(lines)):
+        if '=================== HUBBARD OCCUPATIONS ===================' in line:
+            idx_mat = -ln - 1
+            break
+    
+    data = {}
+
+    read_mat, natom ,nspins = False, 1, 1
+    for line in lines[idx_mat:]:
+
+        if 'occupation matrix' in line and not read_mat:
+            read_mat = True
+            if natom not in data.keys():
+                data[natom] = ''
+            continue
+
+        if ('SPIN' in line or 'ATOM' in line) and read_mat:
+            read_mat = False
+            if 'SPIN' in line:
+                nspins += 1
+                assert int(line.split()[-1]) == nspins
+            if 'ATOM' in line:
+                natom += 1
+                nspins = 1
+            continue
+        if read_mat and not line.strip():
+            read_mat = False
+            break
+        
+        if not read_mat:
+            continue
+        else:
+            data[natom] += line
+        
+    if data == {}:
+        raise ValueError('No data found for input parameters')
+    if nspins not in (2, 4):
+        raise NotImplementedError('Number of spin channels not supported')
+
+    data = np.array([np.loadtxt(s for s in string.splitlines())
+                     for _, string in sorted(data.items())])
+
+    if len(data.shape) == 1:
+        raise NotImplementedError('All density matrices have to have same dimension. '
+                                  + 'Select atoms with density matrices of the same shell.')
+
+    dim = data.shape[2]
+    # Collinear calculations are zero in spin-off-diagonal entries
+    if nspins == 2:
+        if dim % 2 == 0:
+            dim //= 2
+            data = data[:, :, :dim] + 1j * data[:, :, dim:]
+            data = data.reshape(data.shape[0], 2, dim, dim)
+            reshaped_data = np.zeros((data.shape[0], 2, 2, dim, dim), dtype=complex)
+            reshaped_data[:, [0, 1], [0, 1]] = data
+            data = reshaped_data
+        else:
+            reshaped_data = np.zeros((data.shape[0], 2, 2, dim, dim), dtype=float)
+            reshaped_data[:, [0, 1], [0, 1]] = data.reshape(data.shape[0], nspins, dim, dim)
+            data = reshaped_data
+    else:
+        raise NotImplementedError(f'Not implemented for nspins = {nspins}')
+    
+    return helper.qe_to_vasp(data.transpose((0, 3, 4, 1, 2)))
 
 def read_densmat_from_abinit(source, use_entries):
     """
@@ -215,7 +291,6 @@ def read_densmat_from_abinit(source, use_entries):
                                    [np.zeros_like(data), data/2]])
     occupation_per_site = occupation_per_site.transpose((2, 3, 4, 0, 1))
     return occupation_per_site
-
 
 def read_densmat_from_elk(source, select_species_atoms=None):
     """
